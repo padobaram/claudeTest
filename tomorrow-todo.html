@@ -97,6 +97,13 @@
     font-size: 14px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;
   }
   .next b { font-variant-numeric: tabular-nums; }
+  .toasts { position: fixed; top: 16px; right: 16px; left: 16px; display: grid; gap: 8px; justify-items: end; pointer-events: none; z-index: 10; }
+  .toast {
+    pointer-events: auto; max-width: 360px; background: var(--card); border: 1px solid var(--accent); border-left-width: 5px;
+    border-radius: 10px; padding: 10px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); font-size: 14px; cursor: pointer;
+  }
+  .toast b { display: block; }
+  .ghost.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 600; }
   .empty { text-align: center; color: var(--muted); padding: 40px 0; font-size: 14px; }
   footer { margin-top: 24px; display: flex; gap: 8px; flex-wrap: wrap; }
 </style>
@@ -141,10 +148,12 @@
   <p class="empty" id="empty" hidden>할 일이 없어요. 내일 할 일을 추가해 보세요.</p>
 
   <footer>
+    <button class="ghost" id="notifyBtn">🔔 알림 켜기</button>
     <button class="ghost" id="clearDone">완료 항목 삭제</button>
     <button class="ghost" id="exportBtn">텍스트로 복사</button>
   </footer>
 </main>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script>
 (() => {
@@ -287,15 +296,27 @@
 
   $('clearDone').addEventListener('click', () => {
     const n = tasks.filter(x => x.done).length;
-    if (!n || !confirm(`완료된 항목 ${n}개를 삭제할까요?`)) return;
+    const btn = $('clearDone');
+    if (!n) { toast('삭제할 항목이 없어요', '완료한 항목이 아직 없어요.'); return; }
+    if (!btn.dataset.armed) { // 페이지 안에서 확인: 3초 안에 한 번 더 누르면 삭제
+      btn.dataset.armed = '1'; btn.textContent = `정말 ${n}개 삭제? 한 번 더`;
+      setTimeout(() => { delete btn.dataset.armed; btn.textContent = '완료 항목 삭제'; }, 3000);
+      return;
+    }
+    delete btn.dataset.armed; btn.textContent = '완료 항목 삭제';
     tasks = tasks.filter(x => !x.done); commit();
   });
 
   $('exportBtn').addEventListener('click', async () => {
     const text = `[${$('dateLabel').textContent} 할 일]\n` + tasks.map(x =>
       `${x.done ? '☑' : '☐'} ${x.time ? x.time + ' ' : ''}${x.title} (${PRI_LABEL[x.priority]})`).join('\n');
-    try { await navigator.clipboard.writeText(text); alert('클립보드에 복사했어요.'); }
-    catch { prompt('아래 내용을 복사하세요', text); }
+    try { await navigator.clipboard.writeText(text); toast('복사했어요', '클립보드에 할 일 목록이 복사됐어요.'); }
+    catch {
+      const ta = document.createElement('textarea'); ta.value = text; ta.rows = Math.min(10, tasks.length + 2);
+      ta.style.cssText = 'width:100%;margin-top:12px;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text)';
+      document.querySelector('footer').after(ta); ta.select();
+      toast('직접 복사하세요', '아래 상자의 내용을 복사해 주세요.');
+    }
   });
 
   // 드래그로 순서 변경 (직접 정렬 모드)
@@ -336,6 +357,62 @@
       $('nextTime').textContent = fmt(diff) + (diff >= 0 ? ' 후' : ' 지남');
     }
   }
+  // ---- 알림: 마감 시각이 되면 토스트 + 브라우저 알림 ----
+  const NKEY = 'tomorrow-todo:notify';
+  let notifyOn = false;
+  try { notifyOn = localStorage.getItem(NKEY) === '1'; } catch {}
+  function paintNotifyBtn() {
+    const b = $('notifyBtn');
+    b.classList.toggle('on', notifyOn);
+    b.textContent = notifyOn ? '🔔 알림 켜짐' : '🔕 알림 꺼짐';
+  }
+  function toast(title, body) {
+    const el = document.createElement('div'); el.className = 'toast';
+    const b = document.createElement('b'); b.textContent = title;
+    el.append(b, document.createTextNode(body));
+    el.onclick = () => el.remove();
+    $('toasts').append(el);
+    setTimeout(() => el.remove(), 15000);
+  }
+  function alertDue(task) {
+    const body = `${task.time} · ${task.title}`;
+    toast('⏰ 할 일 시간이에요', body);
+    try {
+      if ('Notification' in window && Notification.permission === 'granted')
+        new Notification('⏰ 할 일 시간이에요', { body });
+    } catch {}
+    try { // 짧은 알림음
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.connect(g); g.connect(ac.destination); o.frequency.value = 880; g.gain.value = 0.08;
+      o.start(); o.stop(ac.currentTime + 0.25);
+    } catch {}
+  }
+  function checkAlerts() {
+    if (!notifyOn) return;
+    const now = Date.now(); let changed = false;
+    for (const task of tasks) {
+      if (task.done || !task.time || task.notified) continue;
+      const due = dueOf(task);
+      if (due > now) continue;
+      task.notified = true; changed = true;
+      if (now - due < 5 * 60e3) alertDue(task); // 이미 한참 지난 항목은 조용히 넘김
+    }
+    if (changed) save();
+  }
+  $('notifyBtn').addEventListener('click', async () => {
+    notifyOn = !notifyOn;
+    if (notifyOn) {
+      try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch {}
+      // 켠 시점 이전에 지난 항목은 알리지 않음
+      const now = Date.now(); tasks.forEach(x => { if (x.time && dueOf(x) <= now) x.notified = true; }); save();
+      toast('🔔 알림이 켜졌어요', '마감 시각이 되면 알려 드릴게요. 이 탭을 열어 두세요.');
+    }
+    try { localStorage.setItem(NKEY, notifyOn ? '1' : '0'); } catch {}
+    paintNotifyBtn();
+  });
+  paintNotifyBtn();
+  setInterval(checkAlerts, 1000);
   setInterval(tick, 1000);
   const _render = render;
   render = function () { _render(); tick(); };
