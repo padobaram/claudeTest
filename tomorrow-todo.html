@@ -89,6 +89,14 @@
   }
   .icon:hover { background: var(--accent-soft); color: var(--text); }
   .handle { cursor: grab; color: var(--line); user-select: none; }
+  .countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
+  .countdown.soon { color: var(--mid); }
+  .countdown.late { color: var(--high); }
+  .next {
+    margin-top: 14px; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft);
+    font-size: 14px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  }
+  .next b { font-variant-numeric: tabular-nums; }
   .empty { text-align: center; color: var(--muted); padding: 40px 0; font-size: 14px; }
   footer { margin-top: 24px; display: flex; gap: 8px; flex-wrap: wrap; }
 </style>
@@ -102,6 +110,7 @@
       <div class="progress-label"><span id="progressText">0 / 0 완료</span><span id="progressPct">0%</span></div>
       <div class="bar"><span id="progressBar"></span></div>
     </div>
+    <div class="next" id="next" hidden><span id="nextTitle"></span><b id="nextTime"></b></div>
   </header>
 
   <form class="add" id="addForm" autocomplete="off">
@@ -155,8 +164,22 @@
     try { localStorage.setItem(KEY, JSON.stringify(tasks)); } catch {}
   }
 
+  const tomorrow = () => { const d = new Date(); d.setDate(d.getDate() + 1); return d; };
+  const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // 할 일의 마감 시각(ms). 시간이 없으면 null
+  function dueOf(task) {
+    if (!task.time) return null;
+    const [y, m, d] = (task.date || ymd(tomorrow())).split('-').map(Number);
+    const [hh, mm] = task.time.split(':').map(Number);
+    return new Date(y, m - 1, d, hh, mm).getTime();
+  }
+  function fmt(ms) {
+    const a = Math.abs(Math.floor(ms / 1000));
+    const h = Math.floor(a / 3600), m = Math.floor(a % 3600 / 60), s = a % 60;
+    return (h ? h + '시간 ' : '') + (h || m ? m + '분 ' : '') + String(s).padStart(2, '0') + '초';
+  }
   // 내일 날짜 표시
-  const t = new Date(); t.setDate(t.getDate() + 1);
+  const t = tomorrow();
   $('dateLabel').textContent = t.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 
   function visible() {
@@ -166,7 +189,7 @@
     return list;
   }
 
-  function render() {
+  let render = function render() {
     const ul = $('list');
     ul.innerHTML = '';
     for (const task of visible()) {
@@ -191,7 +214,10 @@
       const meta = document.createElement('div'); meta.className = 'meta';
       const pri = document.createElement('span'); pri.className = 'dot p-' + task.priority; pri.textContent = PRI_LABEL[task.priority];
       meta.append(pri);
-      if (task.time) { const tm = document.createElement('span'); tm.textContent = '🕐 ' + task.time; meta.append(tm); }
+      if (task.time) {
+        const tm = document.createElement('span'); tm.textContent = '🕐 ' + task.time; meta.append(tm);
+        if (!task.done) { const cd = document.createElement('span'); cd.className = 'countdown'; cd.dataset.id = task.id; meta.append(cd); }
+      }
       body.append(title, meta);
 
       const actions = document.createElement('div'); actions.className = 'actions';
@@ -212,7 +238,7 @@
     $('progressText').textContent = `${done} / ${tasks.length} 완료`;
     $('progressPct').textContent = pct + '%';
     $('progressBar').style.width = pct + '%';
-  }
+  };
 
   function btn(text, label, fn) {
     const b = document.createElement('button');
@@ -245,7 +271,7 @@
     if (!title) return;
     tasks.push({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title, time: $('newTime').value, priority: $('newPriority').value, done: false
+      title, date: ymd(tomorrow()), time: $('newTime').value, priority: $('newPriority').value, done: false
     });
     $('newTitle').value = ''; $('newTime').value = '';
     commit(); $('newTitle').focus();
@@ -290,6 +316,29 @@
     tasks.splice(after ? to + 1 : to, 0, moved);
     dragId = null; commit();
   });
+
+  // 실시간 카운트다운 (1초마다 갱신)
+  function tick() {
+    const now = Date.now();
+    document.querySelectorAll('.countdown').forEach(el => {
+      const task = tasks.find(x => x.id === el.dataset.id); if (!task) return;
+      const diff = dueOf(task) - now;
+      el.textContent = diff >= 0 ? '⏳ ' + fmt(diff) + ' 남음' : '⚠ ' + fmt(diff) + ' 지연';
+      el.classList.toggle('late', diff < 0);
+      el.classList.toggle('soon', diff >= 0 && diff < 3600e3);
+    });
+    const upcoming = tasks.filter(x => !x.done && x.time).map(x => ({ x, d: dueOf(x) }))
+      .sort((a, b) => Math.abs(a.d - now) - Math.abs(b.d - now)).sort((a, b) => (a.d < now) - (b.d < now))[0];
+    $('next').hidden = !upcoming;
+    if (upcoming) {
+      const diff = upcoming.d - now;
+      $('nextTitle').textContent = (diff >= 0 ? '다음 일정: ' : '지연된 일정: ') + upcoming.x.title;
+      $('nextTime').textContent = fmt(diff) + (diff >= 0 ? ' 후' : ' 지남');
+    }
+  }
+  setInterval(tick, 1000);
+  const _render = render;
+  render = function () { _render(); tick(); };
 
   render();
 })();
